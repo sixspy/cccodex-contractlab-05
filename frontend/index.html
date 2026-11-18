@@ -53,8 +53,11 @@ createApp({
     const user=ref(localStorage.getItem('contractlab_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const contracts=ref([]), batches=ref([]), buffers=ref([]), recon=ref({});
+    const shadowItems=ref([]), contentions=ref([]), isolation=ref({register:null,deviations:[]});
     const form=ref({subject:'订单入站', payload_fields:'order_id,amount'});
-    const nav=['契约版本','入站校验','双写缓冲','契约对账'];
+    const shadowForm=ref({subject:'订单入站', payload_fields:'order_id,amount,currency,channel'});
+    const shadowMsg=ref('');
+    const nav=['契约版本','入站校验','双写缓冲','契约对账','影子试跑','隔离策略'];
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -81,6 +84,11 @@ createApp({
       buffers.value=Array.isArray(u.items)?u.items:[];
       const q=await loadJson('/api/reconcile'); if(q===null) return;
       recon.value=q&&typeof q==='object'?q:{};
+      const s=await loadJson('/api/shadow'); if(s===null) return;
+      shadowItems.value=Array.isArray(s.items)?s.items:[];
+      contentions.value=Array.isArray(s.contentions)?s.contentions:[];
+      const iso=await loadJson('/api/isolation'); if(iso===null) return;
+      isolation.value=iso&&typeof iso==='object'?iso:{register:null,deviations:[]};
     }
     async function validate(){
       actionErr.value='';
@@ -88,8 +96,14 @@ createApp({
       const j=await r.json(); actionErr.value=r.ok?('校验结果：'+j.result+(j.missing?('；缺 '+j.missing.join(',')):'')):(j.detail||'失败');
       await refresh();
     }
+    async function shadowValidate(){
+      shadowMsg.value='';
+      const r=await fetch('/api/shadow/validate',{method:'POST',headers:auth(),body:JSON.stringify(shadowForm.value)});
+      const j=await r.json(); shadowMsg.value=r.ok?('试跑结果：'+j.result+(j.missing&&j.missing.length?('；缺 '+j.missing.join(',')):'')):(j.detail||'失败');
+      await refresh();
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate};
+    return {token,user,username,password,err,tab,nav,contracts,batches,buffers,recon,form,actionErr,login,logout,validate,shadowItems,contentions,isolation,shadowForm,shadowMsg,shadowValidate};
   },
   template:`
   <div v-if="!token" class="login">
@@ -123,7 +137,7 @@ createApp({
         <div class="err">{{actionErr}}</div>
       </div>
       <div class="card">
-        <h2>最近批次</h2>
+        <h2>最近批次（正式轨）</h2>
         <table><thead><tr><th>批次</th><th>结果</th><th>说明</th></tr></thead>
         <tbody><tr v-for="b in (batches||[]).slice(0,8)" :key="b.id">
           <td>#{{b.id}} {{b.subject}}</td>
@@ -138,8 +152,43 @@ createApp({
       <tbody><tr v-for="b in buffers" :key="b.id"><td>{{b.id}}</td><td>{{b.batch_id}}</td><td>{{b.subject}}</td><td>{{b.reason}}</td></tr></tbody></table>
     </div>
     <div class="card" v-show="tab===3">
-      <h2>契约对账摘要</h2>
+      <h2>契约对账摘要（正式轨）</h2>
       <p>入站 {{recon.ingress_total}} · 通过 {{recon.passed}} · 缓冲 {{recon.buffered}} · 拒收 {{recon.rejected}} · 缓冲行 {{recon.buffer_rows}} · 对齐 {{recon.aligned}}</p>
+      <p class="meta">只统计正式批次表；影子试跑不串入本账，见第 5 页影子队列。</p>
+    </div>
+    <div class="pair" v-show="tab===4">
+      <div class="card">
+        <h2>影子试跑</h2>
+        <p class="meta">按试跑影子契约校验；只写影子批次表，正式账册零写入，不计入正式对账。</p>
+        <label>主题</label><input v-model="shadowForm.subject"/>
+        <label>载荷字段</label><input v-model="shadowForm.payload_fields"/>
+        <button class="primary" @click="shadowValidate">按影子契约试跑</button>
+        <div class="err">{{shadowMsg}}</div>
+      </div>
+      <div class="card">
+        <h2>影子队列</h2>
+        <table><thead><tr><th>批次</th><th>结果</th><th>说明</th></tr></thead>
+        <tbody><tr v-for="b in (shadowItems||[]).slice(0,8)" :key="b.id">
+          <td>#{{b.id}} {{b.subject}} · {{b.contract_version}}</td>
+          <td><span class="stamp" :class="{bad:b.result!=='通过'}">{{b.result}}</span></td>
+          <td>{{b.detail}}</td>
+        </tr></tbody></table>
+        <h2 style="margin-top:14px">影子争用</h2>
+        <table><thead><tr><th>主题</th><th>后到轨</th><th>记录</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="x in contentions" :key="x.id">
+          <td>{{x.subject}}</td><td>{{x.late_track}}</td><td>{{x.detail}}</td><td>{{x.created_at}}</td>
+        </tr></tbody></table>
+      </div>
+    </div>
+    <div class="card" v-show="tab===5">
+      <h2>影子隔离册</h2>
+      <p>隔离路径：{{isolation.register?isolation.register.path:'-'}} · 决定日：{{isolation.register?isolation.register.decided_on:'-'}} · 当日禁止再换</p>
+      <p class="meta">{{isolation.register?isolation.register.note:''}}</p>
+      <h2 style="margin-top:14px">影子偏了（偏离记录）</h2>
+      <table><thead><tr><th>#</th><th>类别</th><th>说明</th><th>时间</th></tr></thead>
+      <tbody><tr v-for="d in isolation.deviations" :key="d.id">
+        <td>{{d.id}}</td><td><span class="stamp bad">{{d.kind}}</span></td><td>{{d.detail}}</td><td>{{d.created_at}}</td>
+      </tr></tbody></table>
     </div>
   </div>`
 }).mount('#app');
